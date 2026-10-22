@@ -1,22 +1,26 @@
 name: AI Changelog
 
-# Draft release notes for the pushed commits using the GitHub Models API.
+# Draft release notes for the pushed commits with GitHub Copilot.
 # The draft lands in the workflow summary and as a run artifact -- it is never
-# committed automatically, so a bad model summary can never reach CHANGELOG.md
+# committed automatically, so a bad summary can never reach CHANGELOG.md
 # without a human reading it first.
+#
+# GitHub Models is retired (2026-07-30), so this uses the Copilot CLI with the
+# built-in GITHUB_TOKEN, which is the supported way to run an AI step in
+# Actions. See "Using Copilot CLI in GitHub Actions with GITHUB_TOKEN".
 on:
   push:
     branches: [main]
   workflow_dispatch:
     inputs:
       model:
-        description: GitHub Models model to write the draft with
+        description: Copilot model to write the draft with
         required: false
-        default: openai/gpt-4o-mini
+        default: auto
 
 permissions:
-  models: read       # GitHub Models inference
-  contents: read     # read the repo to diff the pushed commits
+  contents: read       # checkout the repo and diff the pushed commits
+  copilot-requests: write   # make the Copilot request with GITHUB_TOKEN
 
 jobs:
   draft:
@@ -37,34 +41,60 @@ jobs:
           fi
           after="${{ github.sha }}"
 
-          git log --no-merges --pretty=format:'%s' "$before..$after" > commits.txt || true
-          git diff --stat "$before..$after" > diffstat.txt || true
-
-          {
-            echo "Range: \`$before..$after\`"
-            echo
-            echo "Commits:"
-            cat commits.txt
-            echo
-            echo "Diffstat:"
-            echo '```'
-            cat diffstat.txt
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
+          count=$(git rev-list --count --no-merges "$before..$after")
           echo "before=$before" >> "$GITHUB_OUTPUT"
           echo "after=$after" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "Range: \`$before..$after\` ($count non-merge commits)"
+            echo
+            git log --no-merges --pretty=format:'- %s' "$before..$after"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install Copilot CLI
+        run: npm install -g @github/copilot
 
       - name: Write the changelog draft
+        if: steps.push.outputs.count != '0'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          MODEL: ${{ github.event.inputs.model || 'openai/gpt-4o-mini' }}
+          GITHUB_TOKEN: ${{ github.token }}
+          MODEL: ${{ github.event.inputs.model || 'auto' }}
+          BEFORE: ${{ steps.push.outputs.before }}
+          AFTER: ${{ steps.push.outputs.after }}
         run: |
-          python3 tools/ai_changelog_draft.py > changelog-draft.md
+          cat > prompt.txt <<EOF
+          Write release notes for the commits in the range ${BEFORE}..${AFTER} of this repository.
+
+          Use "git log --no-merges ${BEFORE}..${AFTER}" to list the commits and "git show" to inspect individual ones.
+
+          Group the notes under these headings, omitting any heading with nothing in it:
+          ### Added
+          ### Changed
+          ### Fixed
+          ### Notes
+
+          Rules:
+          - Reply with GitHub-flavored markdown only. No preamble, no closing remarks.
+          - Write for users of the add-on, not for developers reading the diff. Describe behaviour, not implementation.
+          - One bullet per user-visible change. Omit refactors, test-only commits, formatting and CI changes.
+          - If nothing in the range is user-facing, reply with exactly: NO_USER_FACING_CHANGES
+          EOF
+
+          # -s prints only the agent response, so the file is the draft and
+          # nothing else. The two allow-tool patterns are read-only git
+          # commands: a non-interactive run denies anything not pre-approved.
+          copilot -p "$(cat prompt.txt)" -s \
+            --model "$MODEL" \
+            --allow-tool='shell(git log:*)' \
+            --allow-tool='shell(git show:*)' | tee changelog-draft.md
 
       - name: Publish the draft
-        if: success()
+        if: steps.push.outputs.count != '0'
         run: |
+          if grep -q NO_USER_FACING_CHANGES changelog-draft.md; then
+            echo "No user-facing changes in this push." > changelog-draft.md
+          fi
           {
             echo "## AI changelog draft"
             echo
@@ -74,7 +104,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Keep the draft as an artifact
-        if: success()
+        if: steps.push.outputs.count != '0'
         uses: actions/upload-artifact@v4
         with:
           name: changelog-draft
