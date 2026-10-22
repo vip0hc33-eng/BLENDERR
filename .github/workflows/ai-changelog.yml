@@ -1,0 +1,82 @@
+name: AI Changelog
+
+# Draft release notes for the pushed commits using the GitHub Models API.
+# The draft lands in the workflow summary and as a run artifact -- it is never
+# committed automatically, so a bad model summary can never reach CHANGELOG.md
+# without a human reading it first.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      model:
+        description: GitHub Models model to write the draft with
+        required: false
+        default: openai/gpt-4o-mini
+
+permissions:
+  models: read       # GitHub Models inference
+  contents: read     # read the repo to diff the pushed commits
+
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # the "before" commit is needed to build the range
+
+      - name: Collect the pushed range
+        id: push
+        run: |
+          before="${{ github.event.before }}"
+          # A new branch has no "before" commit, and a force-push may point at a
+          # commit this checkout does not have. Fall back to the root commit.
+          if [ "$before" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$before^{commit}" 2>/dev/null; then
+            before=$(git rev-list --max-parents=0 HEAD)
+          fi
+          after="${{ github.sha }}"
+
+          git log --no-merges --pretty=format:'%s' "$before..$after" > commits.txt || true
+          git diff --stat "$before..$after" > diffstat.txt || true
+
+          {
+            echo "Range: \`$before..$after\`"
+            echo
+            echo "Commits:"
+            cat commits.txt
+            echo
+            echo "Diffstat:"
+            echo '```'
+            cat diffstat.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "before=$before" >> "$GITHUB_OUTPUT"
+          echo "after=$after" >> "$GITHUB_OUTPUT"
+
+      - name: Write the changelog draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MODEL: ${{ github.event.inputs.model || 'openai/gpt-4o-mini' }}
+        run: |
+          python3 tools/ai_changelog_draft.py > changelog-draft.md
+
+      - name: Publish the draft
+        if: success()
+        run: |
+          {
+            echo "## AI changelog draft"
+            echo
+            echo "Model: \`${MODEL}\` — draft only, not committed."
+            echo
+            cat changelog-draft.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the draft as an artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: changelog-draft
+          path: changelog-draft.md
+          if-no-files-found: error
