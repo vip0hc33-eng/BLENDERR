@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
-"""Draft release notes for the pushed commits using the GitHub Models API.
+"""Draft release notes for the pushed commits against an OpenAI-compatible API.
 
-Reads the commit list and diffstat collected by the workflow (commits.txt,
-diffstat.txt), asks the model for GitHub-flavored markdown grouped under
-Added / Changed / Fixed / Notes, and prints the draft on stdout.
+Reads the commit list and diffstat (commits.txt, diffstat.txt), asks the model
+for GitHub-flavored markdown grouped under Added / Changed / Fixed / Notes,
+and prints the draft on stdout.
 
-Stdlib only -- it runs on a bare ubuntu-latest runner, so no pip install step.
-The draft is advisory: the workflow never commits it, so a wrong summary costs
-a human a re-run, not a bad CHANGELOG entry.
+Stdlib only -- no pip install step. The draft is advisory: nothing commits it
+automatically, so a wrong summary costs a human a re-run, not a bad CHANGELOG
+entry.
+
+CI does not use this script: the workflow runs the Copilot CLI instead, because
+GitHub Models was retired on 2026-07-30 and the Copilot CLI is the supported
+way to make an AI request from Actions (see .github/workflows/ai-changelog.yml).
+This script is the path for any OpenAI-compatible server -- Azure AI Foundry
+(the successor GitHub points to), a self-hosted model, or a local one.
 
 Usage:
-    GH_TOKEN=<token> MODEL=openai/gpt-4o-mini python3 tools/ai_changelog_draft.py
-
-GITHUB_MODELS_ENDPOINT overrides the inference URL (default: the GitHub Models
-endpoint). Any OpenAI-compatible server works, which is how the script is
-exercised without a GitHub token.
+    INFERENCE_ENDPOINT=https://<host>/chat/completions \\
+    INFERENCE_KEY=<key> MODEL=<model> python3 tools/ai_changelog_draft.py
 """
 import json
 import os
@@ -22,8 +25,8 @@ import sys
 import urllib.error
 import urllib.request
 
-ENDPOINT = os.environ.get("GITHUB_MODELS_ENDPOINT", "https://models.github.ai/inference/chat/completions")
-MODEL = os.environ.get("MODEL", "openai/gpt-4o-mini")
+ENDPOINT = os.environ.get("INFERENCE_ENDPOINT") or os.environ.get("GITHUB_MODELS_ENDPOINT", "")
+MODEL = os.environ.get("MODEL", "gpt-4o-mini")
 NO_CHANGES = "NO_USER_FACING_CHANGES"
 
 SYSTEM_PROMPT = """\
@@ -56,9 +59,18 @@ def read(name):
 
 
 def main():
-    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if not ENDPOINT:
+        print(
+            "ai_changelog_draft: INFERENCE_ENDPOINT is not set -- point it at an "
+            "OpenAI-compatible chat-completions URL (Azure AI Foundry, a "
+            "self-hosted model, ...). GitHub Models was retired on 2026-07-30.",
+            file=sys.stderr,
+        )
+        return 1
+
+    token = os.environ.get("INFERENCE_KEY") or os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if not token:
-        print("ai_changelog_draft: GH_TOKEN is not set", file=sys.stderr)
+        print("ai_changelog_draft: INFERENCE_KEY is not set", file=sys.stderr)
         return 1
 
     commits = read("commits.txt")
@@ -85,8 +97,6 @@ def main():
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
         },
     )
 
@@ -95,7 +105,7 @@ def main():
             body = json.load(response)
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")[:600]
-        print(f"ai_changelog_draft: GitHub Models returned {exc.code}: {detail}", file=sys.stderr)
+        print(f"ai_changelog_draft: the endpoint returned {exc.code}: {detail}", file=sys.stderr)
         return 1
     except Exception as exc:  # network, DNS, timeout
         print(f"ai_changelog_draft: request failed: {exc}", file=sys.stderr)
