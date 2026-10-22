@@ -11,6 +11,10 @@ a human a re-run, not a bad CHANGELOG entry.
 
 Usage:
     GH_TOKEN=<token> MODEL=openai/gpt-4o-mini python3 tools/ai_changelog_draft.py
+
+GITHUB_MODELS_ENDPOINT overrides the inference URL (default: the GitHub Models
+endpoint). Any OpenAI-compatible server works, which is how the script is
+exercised without a GitHub token.
 """
 import json
 import os
@@ -18,7 +22,7 @@ import sys
 import urllib.error
 import urllib.request
 
-ENDPOINT = "https://models.github.ai/inference/chat/completions"
+ENDPOINT = os.environ.get("GITHUB_MODELS_ENDPOINT", "https://models.github.ai/inference/chat/completions")
 MODEL = os.environ.get("MODEL", "openai/gpt-4o-mini")
 NO_CHANGES = "NO_USER_FACING_CHANGES"
 
